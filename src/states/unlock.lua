@@ -87,15 +87,14 @@ Pool.__index = Pool
 local labels = {
 	en = {
 		pool = "Upgrade pool", active = "Active", banned = "Banned", close = "Close", apply = "Apply",
-		ban = "Ban", restore = "Restore", slots = "%d bans, %d slots", next_slot = "Next slot %d ¤",
+		ban = "Ban", restore = "Restore", slots = "Ban slots %d/%d", next_slot = "Next slot %d ¤",
 		balance = "Stars %d ¤",
 		locked = "Unlock Bans in the tree to change the pool.",
 		empty_active = "No active upgrades", empty_banned = "No banned upgrades",
-		favorites = "Favorites", protected = "Protected", favorite = "Favorite",
-		mark_favorite = "Add to favorites and keep active", unmark_favorite = "Remove from favorites",
+		favorites = "Favorites", favorite = "Favorite",
+		mark_favorite = "Add to favorites and keep active", unmark_favorite = "Remove from favorites to allow bans",
 		open_contents = "View items in this upgrade", back_to_pool = "Back to pool",
 		activate_all = "Activate all", pending_slots = "%d new slots for %d ¤",
-		pending_note = "Changes pending",
 		confirm_title = "Confirm slot purchase",
 		purchase = "To apply these changes, buy %d ban %s for %d ¤.",
 		slot_names = {"slot", "slots"},
@@ -114,15 +113,14 @@ local labels = {
 	},
 	ru = {
 		pool = "Пул улучшений", active = "Активные", banned = "В бане", close = "Закрыть", apply = "Применить",
-		ban = "Бан", restore = "Вернуть", slots = "Банов %d, слотов %d", next_slot = "Следующий слот %d ¤",
+		ban = "Бан", restore = "Вернуть", slots = "Слоты бана %d/%d", next_slot = "Следующий слот %d ¤",
 		balance = "Звёзды %d ¤",
 		locked = "Откройте «Баны» в дереве, чтобы менять пул.",
 		empty_active = "Нет активных улучшений", empty_banned = "Нет забаненных улучшений",
-		favorites = "Избранное", protected = "Защищено", favorite = "В избранном",
-		mark_favorite = "В избранное и оставить активным", unmark_favorite = "Убрать из избранного",
+		favorites = "Избранное", favorite = "В избранном",
+		mark_favorite = "В избранное и оставить активным", unmark_favorite = "Убрать из избранного, чтобы разрешить бан",
 		open_contents = "Посмотреть состав набора", back_to_pool = "К спискам",
 		activate_all = "Активировать всё", pending_slots = "Новых слотов %d за %d ¤",
-		pending_note = "Есть неприменённые изменения",
 		confirm_title = "Подтвердить покупку",
 		purchase = "Для применения настроек нужно купить %d %s бана за %d ¤.",
 		slot_names = {"слот", "слота", "слотов"},
@@ -645,7 +643,9 @@ function Pool:draw_upgrade_row(column, row, row_top)
 	local entry = row.entry
 	local fill = row.preview.hovered and tint.hover or entry.favorite and tint.favorite_row or tint.stripe
 	box("fill", fill, column.x, row_top, column.width, row_height - 3, 5)
-	text_at(entry.title, column.x + 9, row_top + 13, column.width - 158, 14,
+	local first_control = row.visible and row or row.star.visible and row.star
+	local title_edge = first_control and first_control.pos.x - first_control.halfsize.x or column.x + column.width
+	text_at(entry.title, column.x + 9, row_top + 13, title_edge - column.x - 18, 14,
 		entry.favorite and tint.favorite or tint.ink)
 	local shown = icon_count(column, entry)
 	local hover_index = row.preview.hovered and icon_index(column, row_top, entry, row.preview.mouse_pos)
@@ -678,28 +678,31 @@ function Pool:draw_panel()
 	self.hover_help = nil
 
 	local summary = L.balance:format(SAVE.stars) .. "     " .. L.slots:format(self.used_slots, self.slot_count)
-	text_at(summary, x + 24, y + 64, pw - 312, 14, tint.muted)
+	text_at(summary, x + 24, y + 59, pw - 312, 14, tint.muted)
 	if self.pending_slots > 0 then
-		text_at(L.pending_slots:format(self.pending_slots, self.pending_total), x + pw - 283, y + 64,
+		text_at(L.pending_slots:format(self.pending_slots, self.pending_total), x + pw - 283, y + 59,
 			260, 15, tint.favorite, "right")
 	elseif self.change_allowed and self.next_cost > 0 then
-		text_at(L.next_slot:format(self.next_cost), x + pw - 283, y + 64, 260, 14, tint.muted, "right")
+		text_at(L.next_slot:format(self.next_cost), x + pw - 283, y + 59, 260, 14, tint.muted, "right")
 	end
 
 	for index, column in ipairs(self.columns) do
 		local ink = index == 1 and tint.active or tint.banned
 		local heading = index == 1 and L.active or L.banned
-		local heading_width = index == 1 and column.width / 2 or column.width - 181
+		local heading_y = column.y - 21
+		local show_favorites = index == 1 and self.favorite_count > 0
+		local has_controls = show_favorites or index == 2 and self.activate_button.visible
+		local heading_width = column.width - (has_controls and 166 or 16)
 		local count = tostring(#column.entries)
 		if #column.entries ~= #column.all_entries then count = count .. "/" .. #column.all_entries end
-		text_at(heading .. " " .. count, column.x + 8, column.y - 16, heading_width, 17, ink)
-		if index == 1 then
-			draw_star(column.x + heading_width + 2, column.y - 16, self.favorite_count > 0, true)
-			text_at(L.favorites .. " " .. self.favorite_count, column.x + heading_width + 15, column.y - 16,
-				column.width - heading_width - 23, 14, tint.favorite)
+		text_at(heading .. " " .. count, column.x + 8, heading_y, heading_width, 17, ink)
+		if show_favorites then
+			local star_x = column.x + column.width - 131
+			draw_star(star_x, heading_y, true, true)
+			text_at(L.favorites .. " " .. self.favorite_count, star_x + 13, heading_y, 110, 14, tint.favorite)
 		end
 		for row_number, row in ipairs(column.rows) do
-			if row.visible then
+			if row.entry then
 				self:draw_upgrade_row(column, row, column.y + (row_number - 1) * row_height)
 			end
 		end
@@ -723,8 +726,6 @@ function Pool:draw_panel()
 		text_at(self.hover_help, x + 24, y + ph - 23, pw - 48, 13, tint.muted)
 	elseif self.loaded_preset then
 		text_at(L.preset_loaded:format(self.loaded_preset), x + 24, y + ph - 23, pw - 48, 13, tint.active, nil, "zh")
-	elseif self.draft.changed then
-		text_at(L.pending_note, x + 24, y + ph - 23, pw - 48, 13, tint.muted)
 	end
 end
 
@@ -776,7 +777,9 @@ function Pool:layout_rows()
 		for row_number, row in ipairs(column.rows) do
 			local entry = column.entries[column.first + row_number - 1]
 			set_entry(row, entry, entry and not entry.favorite and self.change_allowed)
+			row.visible = row.available
 			set_entry(row.star, entry, entry and self.change_allowed and self:is_purchased_upgrade(entry.key))
+			row.star.visible = row.star.available
 			set_entry(row.preview, entry, entry and #entry.items > 0)
 			row.ink = index == 1 and tint.banned or tint.active
 		end
@@ -796,17 +799,17 @@ function Pool:layout_rows()
 			local page = column.following.available and column.following or column.previous.available and column.previous or nil
 			row.nav_up = row_focus(previous) or header
 			row.nav_down = row_focus(following) or page
-			row.nav_left = row.star.available and row.star or row.preview.available and row.preview
-				or index == 2 and opposite or nil
-			row.nav_right = index == 1 and opposite or nil
+			row.nav_left = row.preview.available and row.preview or index == 2 and opposite or nil
+			row.nav_right = row.star.available and row.star or index == 1 and opposite or nil
 			row.star.nav_up = row_focus(previous, "star") or header
 			row.star.nav_down = row_focus(following, "star") or page
-			row.star.nav_left = row.preview.available and row.preview or index == 2 and opposite or nil
-			row.star.nav_right = row.available and row or index == 1 and opposite or nil
+			row.star.nav_left = row.available and row or row.preview.available and row.preview
+				or index == 2 and opposite or nil
+			row.star.nav_right = index == 1 and opposite or nil
 			row.preview.nav_up = row_focus(previous, "preview") or header
 			row.preview.nav_down = row_focus(following, "preview") or page
 			row.preview.nav_left = index == 2 and opposite or nil
-			row.preview.nav_right = row.star.available and row.star or row.available and row or index == 1 and opposite or nil
+			row.preview.nav_right = row.available and row or row.star.available and row.star or index == 1 and opposite or nil
 		end
 		column.previous.nav_up = row_focus(column.rows[last]) or self.search_button
 		column.following.nav_up = column.previous.nav_up
@@ -888,7 +891,7 @@ function Pool:refresh()
 		}
 	end
 	self.activate_button.available = self.change_allowed and can_activate_all
-	self.activate_button.suppress_sound = not self.activate_button.available
+	self.activate_button.visible = self.activate_button.available
 	self.columns[1].all_entries = active_entries
 	self.columns[2].all_entries = banned_entries
 	for _, column in ipairs(self.columns) do
@@ -1060,21 +1063,23 @@ function Pool:build_panel()
 	self.close_button.ink = tint.active
 	local presets_width, presets_gap = 123, 10
 	local search_width = pw - 46 - presets_width - presets_gap
-	self.search_button = self:add_text_field(body, x + 23, y + 83, search_width, 29, {
+	local search_y, search_height = y + 75, 29
+	self.search_button = self:add_text_field(body, x + 23, search_y, search_width, search_height, {
 		get = function() return self.search_query end,
 		set = function(query) self:set_search_query(query) end,
 		hint = function() return words().search end, inset = 57,
 	})
-	self.search_clear = add_button(body, x + 23 + search_width - 31, y + 86, 25, 23,
+	self.search_clear = add_button(body, x + 23 + search_width - 31, search_y + 3, 25, search_height - 6,
 		function() return "X" end,
 		function()
 			self:set_search_query("")
 			self.modal_ui:focus(self.search_button)
 		end)
 	self.search_clear.order = self.search_button.order + 1
-	self.presets_button = add_button(body, x + pw - 23 - presets_width, y + 83, presets_width, 29,
+	self.presets_button = add_button(body, x + pw - 23 - presets_width, search_y, presets_width, search_height,
 		function() return words().presets end, function() self:open_presets() end)
-	self.activate_button = add_button(body, x + pw - 183, y + 115, 160, 26,
+	local activate_y, activate_height = search_y + search_height + 12, 26
+	self.activate_button = add_button(body, x + pw - 173, activate_y, 150, activate_height,
 		function() return words().activate_all end, function() self:activate_all() end)
 	self.activate_button.ink = tint.active
 
@@ -1082,17 +1087,13 @@ function Pool:build_panel()
 	local width = (pw - gap - 46) / 2
 	for index = 1, 2 do
 		local cx = x + 23 + (index - 1) * (width + gap)
-		local cy = y + 144
+		local cy = activate_y + activate_height + 8
 		local column = {x = cx, y = cy, width = width, first = 1, rows = {}, entries = {}, all_entries = {}}
 		self.columns[index] = column
 		for row_number = 1, rows_per_column do
 			local row_top = cy + (row_number - 1) * row_height
-			local row = add_button(body, cx + width - 110, row_top + 3, 106, 21,
-				function(button)
-					if button.entry.favorite then return words().protected end
-					if index == 2 then return words().restore end
-					return words().ban
-				end,
+			local row = add_button(body, cx + width - 142, row_top + 3, 106, 21,
+				function() return index == 2 and words().restore or words().ban end,
 				function(button)
 					if not button.entry or not button.available or not self:toggle_draft_ban(button.entry.key) then return end
 					if input.mode == "gamepad" then
@@ -1100,7 +1101,7 @@ function Pool:build_panel()
 						self.modal_ui:focus(row_focus(column.rows[math.min(row_number, last)]) or self.close_button)
 					end
 				end)
-			row.star = add_button(body, cx + width - 142, row_top + 3, 28, 21, nil,
+			row.star = add_button(body, cx + width - 32, row_top + 3, 28, 21, nil,
 				function(button)
 					if not button.available then return end
 					local key = button.entry.key
