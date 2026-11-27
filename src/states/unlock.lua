@@ -155,6 +155,9 @@ local tint = {
 
 local rows_per_column = 6
 local row_height = 46
+local list_height = rows_per_column * row_height
+local scrollbar_height = list_height - 3
+local scrollbar_gutter = 18
 local icon_size, icon_spacing = 20, 22
 local detail_columns, detail_rows = 4, 4
 local items_per_page = detail_columns * detail_rows
@@ -444,6 +447,7 @@ end
 function Pool:close()
 	self:focus_text()
 	self.open = false
+	self.scrollbar_drag = nil
 	self.draft = nil
 	self.confirmation = nil
 	self.previous_focus = nil
@@ -483,6 +487,7 @@ end
 
 function Pool:show_confirmation(quote)
 	self:focus_text()
+	self.scrollbar_drag = nil
 	self.confirmation = quote
 	self.buy_button.available = quote.discard or quote.overwrite ~= nil or quote.total <= quote.balance
 	self.buy_button.suppress_sound = not self.buy_button.available
@@ -710,10 +715,10 @@ function Pool:draw_panel()
 			local message = #column.all_entries > 0 and L.no_matches
 				or index == 1 and L.empty_active or L.empty_banned
 			text_at(message, column.x + 8, column.y + 31, column.width - 16, 14, tint.muted)
-		elseif #column.entries > rows_per_column then
+		elseif column.scrollbar.visible then
 			local last = math.min(#column.entries, column.first + rows_per_column - 1)
 			text_at(("%d–%d / %d"):format(column.first, last, #column.entries),
-				column.x + 8, column.y + row_height * rows_per_column + 15,
+				column.x + 8, column.y + list_height + 15,
 				column.width - 82, 13, tint.muted)
 		end
 	end
@@ -758,6 +763,17 @@ local function row_focus(row, lane)
 	if row.preview.available then return row.preview end
 end
 
+local function last_first_row(column)
+	return math.max(1, #column.entries - rows_per_column + 1)
+end
+
+local function scroll_thumb(column)
+	local height = math.max(24, scrollbar_height * rows_per_column / #column.entries)
+	local travel = scrollbar_height - height
+	local top = travel * (column.first - 1) / (last_first_row(column) - 1)
+	return top, height, travel
+end
+
 function Pool:layout_rows()
 	self.discard_button.visible = self.draft.changed
 	self.search_clear.visible = self.search_query ~= ""
@@ -765,10 +781,11 @@ function Pool:layout_rows()
 	self.presets_button.suppress_sound = not self.change_allowed
 	local presets = self.change_allowed and self.presets_button or nil
 	for index, column in ipairs(self.columns) do
-		local last_first = math.max(1, #column.entries - rows_per_column + 1)
+		local last_first = last_first_row(column)
 		column.first = math.clamp(column.first, 1, last_first)
-		column.previous.visible = #column.entries > rows_per_column
-		column.following.visible = column.previous.visible
+		column.scrollbar.visible = last_first > 1
+		column.previous.visible = column.scrollbar.visible
+		column.following.visible = column.scrollbar.visible
 		column.previous.available = column.first > 1
 		column.following.available = column.first < last_first
 		column.previous.suppress_sound = not column.previous.available
@@ -911,7 +928,9 @@ end
 function Pool:filter_entries(reset_page)
 	local query = search_key(self.search_query)
 	local locale = require("locale").get_code()
+	self.scrollbar_drag = nil
 	for _, column in ipairs(self.columns) do
+		column.wheel_remainder = 0
 		if query == "" then
 			column.entries = column.all_entries
 		else
@@ -1003,9 +1022,59 @@ function Pool:add_text_field(kernel, x, y, width, height, field)
 	return button
 end
 
-function Pool:page(column, amount)
-	column.first = column.first + amount
+function Pool:scroll_to(column, first)
+	first = math.clamp(first, 1, last_first_row(column))
+	if first == column.first then return end
+	column.first = first
 	self:layout_rows()
+end
+
+function Pool:update_scrollbar(position)
+	local drag = self.scrollbar_drag
+	if not drag and input:cursor_just_pressed(1) then
+		for _, column in ipairs(self.columns) do
+			if column.scrollbar.visible and column.scrollbar:mouse_over(position) then
+				local top, height = scroll_thumb(column)
+				local offset = position.y - column.y - top
+				local grab_offset = offset >= 0 and offset <= height and offset or height / 2
+				drag = {column = column, grab_offset = grab_offset}
+				self.scrollbar_drag = drag
+				break
+			end
+		end
+	end
+	if not drag then return false end
+	local column = drag.column
+	local _, _, travel = scroll_thumb(column)
+	local progress = math.clamp01((position.y - column.y - drag.grab_offset) / travel)
+	local first = 1 + math.round(progress * (last_first_row(column) - 1))
+	self:scroll_to(column, first)
+	if not input:cursor_pressed(1) then self.scrollbar_drag = nil end
+	return true
+end
+
+function Pool:update_list_scrolling(scroll)
+	if input.mode ~= "desktop" then
+		self.scrollbar_drag = nil
+		return
+	end
+	if scroll == 0 and not self.scrollbar_drag and not input:cursor_just_pressed(1) then return end
+
+	self.state.camera:check_display()
+	local position = self.modal_ui:mouse_pos()
+	if self:update_scrollbar(position) or scroll == 0 then return end
+	for _, column in ipairs(self.columns) do
+		if column.scrollbar.visible and position.x >= column.x
+			and position.x < column.x + column.width + scrollbar_gutter
+			and position.y >= column.y and position.y < column.y + list_height + 30
+		then
+			local delta = column.wheel_remainder + scroll
+			local steps = delta >= 0 and math.floor(delta) or math.ceil(delta)
+			column.wheel_remainder = delta - steps
+			self:scroll_to(column, column.first - steps)
+			return
+		end
+	end
 end
 
 local row_lanes = {"action", "star", "preview"}
@@ -1023,7 +1092,7 @@ function Pool:scroll_focused_row()
 			for _, lane in ipairs(row_lanes) do
 				local control = row[lane] or row
 				if control.available and control:mouse_over(position) then
-					self:page(column, down and 1 or -1)
+					self:scroll_to(column, column.first + (down and 1 or -1))
 					self.modal_ui:focus(row_focus(row, lane) or self.search_button)
 					return true
 				end
@@ -1090,6 +1159,24 @@ function Pool:build_panel()
 		local cy = activate_y + activate_height + 8
 		local column = {x = cx, y = cy, width = width, first = 1, rows = {}, entries = {}, all_entries = {}}
 		self.columns[index] = column
+		column.scrollbar = body:add_from_system("ui", {
+			order = 250,
+			pos = vec2(cx + width + 10, cy + scrollbar_height / 2),
+			halfsize = vec2(8, scrollbar_height / 2),
+			click_type = "custom",
+			click_test = function(bar, center, pointer)
+				if self.scrollbar_drag then return self.scrollbar_drag.column == column end
+				return intersect.aabb_point_overlap(center, bar.halfsize, pointer)
+			end,
+			visible = false,
+			suppress_sound = true,
+			draw = function(bar)
+				local top, height = scroll_thumb(column)
+				local highlighted = bar.hovered or self.scrollbar_drag and self.scrollbar_drag.column == column
+				box("fill", tint.button, -3, -bar.halfsize.y, 6, scrollbar_height, 3)
+				box("fill", highlighted and tint.ink or tint.muted, -3, top - bar.halfsize.y, 6, height, 3)
+			end,
+		})
 		for row_number = 1, rows_per_column do
 			local row_top = cy + (row_number - 1) * row_height
 			local row = add_button(body, cx + width - 142, row_top + 3, 106, 21,
@@ -1133,11 +1220,11 @@ function Pool:build_panel()
 			row.preview.visible = false
 			column.rows[row_number] = row
 		end
-		local page_y = cy + rows_per_column * row_height + 3
+		local page_y = cy + list_height + 3
 		column.previous = add_button(body, cx + width - 65, page_y, 27, 24,
-			function() return "<" end, function() self:page(column, -rows_per_column) end)
+			function() return "<" end, function() self:scroll_to(column, column.first - rows_per_column) end)
 		column.following = add_button(body, cx + width - 30, page_y, 27, 24,
-			function() return ">" end, function() self:page(column, rows_per_column) end)
+			function() return ">" end, function() self:scroll_to(column, column.first + rows_per_column) end)
 	end
 end
 
@@ -1607,28 +1694,19 @@ function Pool:update(dt)
 			self:request_close()
 			return true
 		end
+		self:update_list_scrolling(scroll)
 		if self:scroll_focused_row() then return true end
+		self.modal:update(dt)
+		return true
 	end
 	if scroll ~= 0 and input.mode == "desktop" then
 		self.state.camera:check_display()
 		local pos = self.state.camera:screen_to_ui(input:cursor())
-		if self.open then
-			for _, column in ipairs(self.columns) do
-				if pos.x >= column.x and pos.x < column.x + column.width
-					and pos.y >= column.y and pos.y < column.y + row_height * rows_per_column + 30
-				then
-					self:page(column, scroll > 0 and -3 or 3)
-				end
-			end
-		elseif pos.x >= 0 and pos.x < self.info_box.pos.x - self.info_box.halfsize.x
+		if pos.x >= 0 and pos.x < self.info_box.pos.x - self.info_box.halfsize.x
 			and pos.y >= 0 and pos.y <= self.height
 		then
 			self:set_zoom(self.zoom * 1.16 ^ scroll, pos)
 		end
-	end
-	if self.open then
-		self.modal:update(dt)
-		return true
 	end
 	return false
 end
