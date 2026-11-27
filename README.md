@@ -11,6 +11,8 @@ Close the game. Open [unlock.lua](src/states/unlock.lua) and download the raw fi
 
 Start the game and open **Upgrade pool** in Star Guts. To uninstall, close the game and delete the Lua file you added.
 
+Use **Presets** to save or overwrite a named setup. After loading one, select **Apply** to use it.
+
 ## Screenshots
 
 ![Upgrade pool with favorites, banned sets and item previews](screenshots/upgrade-pool.png)

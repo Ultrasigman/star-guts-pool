@@ -105,6 +105,12 @@ local labels = {
 		discard = "Discard changes", discard_title = "Discard pending changes?",
 		keep_editing = "Keep editing", discard_close = "Discard and close",
 		search = "Search upgrades or items", no_matches = "No matching upgrades",
+		presets = "Presets", preset_name = "Preset name", save_new = "Save as new",
+		load_preset = "Load", overwrite = "Overwrite", overwrite_title = "Overwrite saved preset?",
+		cancel = "Cancel", empty_presets = "No saved presets",
+		preset_hint = "Load a preset, then apply it in the upgrade pool.",
+		duplicate_preset = "That name is taken. Use Overwrite to update the saved preset.",
+		preset_saved = "Saved \"%s\".", preset_loaded = "Loaded \"%s\".",
 	},
 	ru = {
 		pool = "Пул улучшений", active = "Активные", banned = "В бане", close = "Закрыть", apply = "Применить",
@@ -126,6 +132,12 @@ local labels = {
 		discard = "Отменить изменения", discard_title = "Отменить неприменённые изменения?",
 		keep_editing = "Продолжить редактирование", discard_close = "Отменить и закрыть",
 		search = "Поиск по улучшениям и предметам", no_matches = "Совпадений нет",
+		presets = "Пресеты", preset_name = "Название пресета", save_new = "Сохранить новый",
+		load_preset = "Загрузить", overwrite = "Перезаписать", overwrite_title = "Перезаписать пресет?",
+		cancel = "Отмена", empty_presets = "Нет сохранённых пресетов",
+		preset_hint = "Загрузите пресет и нажмите «Применить» в пуле улучшений.",
+		duplicate_preset = "Это имя занято. Нажмите «Перезаписать», чтобы обновить пресет.",
+		preset_saved = "Сохранён «%s».", preset_loaded = "Загружен «%s».",
 	},
 }
 
@@ -149,6 +161,8 @@ local icon_size, icon_spacing = 20, 22
 local detail_columns, detail_rows = 4, 4
 local items_per_page = detail_columns * detail_rows
 local favorite_var = "star_guts_pool_favorites"
+local preset_var = "star_guts_pool_presets_v1"
+local presets_per_page = 6
 
 local function words()
 	return labels[require("locale").get_code()] or labels.en
@@ -175,12 +189,20 @@ local function box(mode, fill, x, y, width, height, radius)
 	lg.rectangle(mode, x, y, width, height, radius)
 end
 
-local function text_at(text, x, y, width, size, color, align)
-	display:set_font("ui", size)
+local function set_ui_font(size, locale)
+	if locale then
+		display:set_locale_font("ui", size, locale)
+	else
+		display:set_font("ui", size)
+	end
+end
+
+local function text_at(text, x, y, width, size, color, align, locale)
+	set_ui_font(size, locale)
 	local text_width = lg.getFont():getWidth(text)
 	local limit = width * display.print_scale - 2
 	if text_width > limit then
-		display:set_font("ui", math.max(8, math.floor(size * limit / text_width)))
+		set_ui_font(math.max(8, math.floor(size * limit / text_width)), locale)
 	end
 	lg.setColor(unpack(color))
 	local height = lg.getFont():getHeight() / display.print_scale
@@ -211,6 +233,38 @@ end
 local function favorite_keys()
 	local saved = SAVE:get_var(favorite_var)
 	return set(type(saved) == "string" and saved:split_and_trim(",") or {})
+end
+
+local function read_presets()
+	local data = SAVE:get_var(preset_var)
+	local entries = {}
+	if type(data) ~= "string" then return entries end
+	for record in data:gmatch("[^;]+") do
+		local encoded, banned, favorites = record:match("^([^|]+)|([^|]*)|([^|]*)$")
+		if encoded then
+			local ok, name = pcall(love.data.decode, "string", "base64", encoded)
+			if ok and name ~= "" and utf8.len(name) and not name:find("%c") then
+				entries[#entries + 1] = {
+					name = name, bans = set(banned:split_and_trim(",")),
+					favorites = set(favorites:split_and_trim(",")),
+				}
+			end
+		end
+	end
+	return entries
+end
+
+local function write_presets(entries)
+	local records = {}
+	for index, entry in ipairs(entries) do
+		records[index] = table.concat({
+			love.data.encode("string", "base64", entry.name),
+			table.concat(entry.bans:values_readonly(), ","),
+			table.concat(entry.favorites:values_readonly(), ","),
+		}, "|")
+	end
+	SAVE:set_var(preset_var, table.concat(records, ";"))
+	SAVE:save()
 end
 
 function Pool.is_favorite(key)
@@ -390,16 +444,18 @@ function Pool.draw_favorite_label(button)
 end
 
 function Pool:close()
-	self:focus_search(false)
+	self:focus_text()
 	self.open = false
 	self.draft = nil
 	self.confirmation = nil
 	self.previous_focus = nil
 	self.inspection = nil
+	self.presets = nil
 	self.cached_tooltip = nil
 	if self.background then self.background.source = nil end
 	self.modal_ui:focus(nil)
 	self.details_ui:focus(nil)
+	self.presets_ui:focus(nil)
 	self.confirm_ui:focus(nil)
 end
 
@@ -428,9 +484,9 @@ function Pool:apply_draft(quote)
 end
 
 function Pool:show_confirmation(quote)
-	self:focus_search(false)
+	self:focus_text()
 	self.confirmation = quote
-	self.buy_button.available = quote.discard or quote.total <= quote.balance
+	self.buy_button.available = quote.discard or quote.overwrite ~= nil or quote.total <= quote.balance
 	self.buy_button.suppress_sound = not self.buy_button.available
 	self.revise_button.nav_right = self.buy_button.available and self.buy_button or nil
 	self.confirm_ui:focus(self.revise_button)
@@ -470,11 +526,15 @@ function Pool:confirm_purchase()
 	end
 end
 
-function Pool:revise_bans()
+function Pool:leave_confirmation()
 	if not self.confirmation then return end
 	self.confirmation = nil
 	self.confirm_ui:focus(nil)
-	self.modal_ui:focus(self.previous_focus or self.close_button)
+	if self.presets then
+		self.presets_ui:focus(self.previous_focus or self.presets_back)
+	else
+		self.modal_ui:focus(self.previous_focus or self.close_button)
+	end
 	self.previous_focus = nil
 end
 
@@ -503,6 +563,11 @@ function Pool:build_confirmation()
 			text_at(L.discard_title, x + 24, y + 88, w - 48, 25, tint.ink, "center")
 			return
 		end
+		if quote.overwrite then
+			text_at(L.overwrite_title, x + 24, y + 62, w - 48, 25, tint.ink, "center")
+			text_at(quote.overwrite.name, x + 24, y + 116, w - 48, 17, tint.favorite, "center", "zh")
+			return
+		end
 		text_at(L.confirm_title, x + 24, y + 42, w - 48, 25, tint.ink, "center")
 		local message = L.purchase:format(quote.needed, slot_word(L.slot_names, quote.needed), quote.total)
 		text_at(message, x + 24, y + 90, w - 48, 15, tint.ink, "center")
@@ -518,18 +583,30 @@ function Pool:build_confirmation()
 	end})
 	local width = (w - 72) / 2
 	self.buy_button = add_button(kernel, x + w - width - 26, y + h - 66, width, 38,
-		function() return self.confirmation.discard and words().discard_close or words().confirm end,
+		function()
+			local L = words()
+			if self.confirmation.overwrite then return L.overwrite end
+			return self.confirmation.discard and L.discard_close or L.confirm
+		end,
 		function()
 			if self.confirmation.discard then
 				self:close()
+			elseif self.confirmation.overwrite then
+				local preset = self.confirmation.overwrite
+				self:leave_confirmation()
+				self:save_preset(preset)
 			else
 				self:confirm_purchase()
 			end
 		end)
 	self.buy_button.ink = tint.favorite
 	self.revise_button = add_button(kernel, x + 26, y + h - 66, width, 38,
-		function() return self.confirmation.discard and words().keep_editing or words().revise end,
-		function() self:revise_bans() end, {key = "escape", gamepad = "b"})
+		function()
+			local L = words()
+			if self.confirmation.overwrite then return L.cancel end
+			return self.confirmation.discard and L.keep_editing or L.revise
+		end,
+		function() self:leave_confirmation() end, {key = "escape", gamepad = "b"})
 	self.buy_button.nav_left = self.revise_button
 end
 
@@ -644,6 +721,8 @@ function Pool:draw_panel()
 		text_at(L.shortage:format(self.pending_total - SAVE.stars), x + 24, y + ph - 23, pw - 48, 13, tint.banned)
 	elseif self.hover_help then
 		text_at(self.hover_help, x + 24, y + ph - 23, pw - 48, 13, tint.muted)
+	elseif self.loaded_preset then
+		text_at(L.preset_loaded:format(self.loaded_preset), x + 24, y + ph - 23, pw - 48, 13, tint.active, nil, "zh")
 	elseif self.draft.changed then
 		text_at(L.pending_note, x + 24, y + ph - 23, pw - 48, 13, tint.muted)
 	end
@@ -681,6 +760,9 @@ end
 function Pool:layout_rows()
 	self.discard_button.visible = self.draft.changed
 	self.search_clear.visible = self.search_query ~= ""
+	self.presets_button.available = self.change_allowed
+	self.presets_button.suppress_sound = not self.change_allowed
+	local presets = self.change_allowed and self.presets_button or nil
 	for index, column in ipairs(self.columns) do
 		local last_first = math.max(1, #column.entries - rows_per_column + 1)
 		column.first = math.clamp(column.first, 1, last_first)
@@ -704,7 +786,8 @@ function Pool:layout_rows()
 		local other = self.columns[3 - index]
 		local last = math.min(rows_per_column, #column.entries)
 		local other_last = math.min(rows_per_column, #other.entries)
-		local header = index == 2 and self.activate_button.available and self.activate_button or self.search_button
+		local header = index == 2 and (self.activate_button.available and self.activate_button or presets)
+			or self.search_button
 		for row_number = 1, last do
 			local row = column.rows[row_number]
 			local opposite = row_focus(other.rows[math.min(row_number, other_last)]) or self.search_button
@@ -733,19 +816,23 @@ function Pool:layout_rows()
 	local first_active = row_focus(self.columns[1].rows[1])
 	local first_banned = row_focus(self.columns[2].rows[1])
 	local edit_bans = self.activate_button.available and self.activate_button or first_banned
-	self.activate_button.nav_up = self.search_button
+	self.activate_button.nav_up = presets or self.search_button
 	self.activate_button.nav_down = first_banned or first_active
 	self.activate_button.nav_left = first_active or self.search_button
-	self.close_button.nav_down = self.search_clear.visible and self.search_clear or self.search_button
+	self.close_button.nav_down = presets or self.search_clear.visible and self.search_clear or self.search_button
 	self.close_button.nav_left = self.discard_button.visible and self.discard_button or self.search_button
 	self.discard_button.nav_right = self.close_button
 	self.discard_button.nav_down = self.search_button
 	self.search_button.nav_up = self.discard_button.visible and self.discard_button or self.close_button
 	self.search_button.nav_down = first_active or edit_bans
-	self.search_button.nav_right = self.search_clear.visible and self.search_clear or edit_bans
+	self.search_button.nav_right = self.search_clear.visible and self.search_clear or presets or edit_bans
 	self.search_clear.nav_up = self.close_button
 	self.search_clear.nav_left = self.search_button
 	self.search_clear.nav_down = edit_bans or first_active
+	self.search_clear.nav_right = presets
+	self.presets_button.nav_up = self.close_button
+	self.presets_button.nav_down = edit_bans or first_active
+	self.presets_button.nav_left = self.search_clear.visible and self.search_clear or self.search_button
 end
 
 function Pool:is_purchased_upgrade(key)
@@ -772,6 +859,7 @@ function Pool:refresh()
 	local bans = require("src.bans")
 	local draft = self.draft
 	local banned, favorites = draft.bans, draft.favorites
+	self.loaded_preset = nil
 	draft.changed = not (same_keys(banned, draft.saved_bans) and same_keys(favorites, draft.saved_favorites))
 	local quote = self:quote_purchase()
 	self.used_slots, self.slot_count = quote.used, quote.owned
@@ -835,59 +923,81 @@ function Pool:filter_entries(reset_page)
 	self:layout_rows()
 end
 
+local function input_line(text, capacity)
+	text = text:gsub("%c", " ")
+	if not utf8.len(text) then return end
+	local limit = utf8.offset(text, capacity + 1)
+	return limit and text:sub(1, limit - 1) or text
+end
+
 function Pool:set_search_query(query)
-	query = query:gsub("%c", " ")
-	if not utf8.len(query) then return end
-	local limit = utf8.offset(query, 81)
-	if limit then query = query:sub(1, limit - 1) end
-	if self.search_query == query then return end
+	query = input_line(query, 80)
+	if not query or self.search_query == query then return end
 	self.search_query = query
 	self:filter_entries(true)
 end
 
-function Pool:focus_search(focused)
-	local current = self.search_input
-	if focused and not current then
-		current = {
-			previous = love.textinput,
-			text_enabled = love.keyboard.hasTextInput(),
-			key_repeat = love.keyboard.hasKeyRepeat(),
-		}
-		current.callback = function(text) self:set_search_query(self.search_query .. text) end
-		self.search_input = current
-		self.search_button.selected = true
-		love.textinput = current.callback
-		love.keyboard.setTextInput(true)
-		love.keyboard.setKeyRepeat(true)
-	elseif not focused and current then
+function Pool:focus_text(button)
+	local current = self.text_input
+	if current and current.button == button then return end
+	if current then
 		if love.textinput == current.callback then love.textinput = current.previous end
 		love.keyboard.setTextInput(current.text_enabled)
 		love.keyboard.setKeyRepeat(current.key_repeat)
-		self.search_input = nil
-		self.search_button.selected = false
+		current.button.selected = false
+		self.text_input = nil
 	end
+	if not button then return end
+	local field = button.field
+	local editing = {
+		button = button, previous = love.textinput,
+		text_enabled = love.keyboard.hasTextInput(), key_repeat = love.keyboard.hasKeyRepeat(),
+		callback = function(text) field.set(field.get() .. text) end,
+	}
+	self.text_input = editing
+	button.selected = true
+	love.textinput = editing.callback
+	love.keyboard.setTextInput(true)
+	love.keyboard.setKeyRepeat(true)
 end
 
-function Pool:update_search()
-	local control = love.keyboard.isDown("lctrl", "rctrl")
-	if control and input.keyboard:just_pressed("f") then self:focus_search(true) end
-	if not self.search_input then return false end
+function Pool:update_text_input(ui)
+	local editing = self.text_input
+	if not editing then return false end
+	local field = editing.button.field
 	if input.keyboard:just_pressed("escape") or (input.mode == "gamepad" and input.gamepad:just_pressed("b")) then
-		self:focus_search(false)
+		self:focus_text()
 		return true
 	end
 	if input.keyboard:just_pressed("return") or input.keyboard:just_pressed("kpenter") then
-		self:focus_search(false)
+		self:focus_text()
+		if field.submit then field.submit() end
+		return true
 	elseif input.keyboard:just_pressed("backspace") then
-		local last = utf8.offset(self.search_query, -1)
-		if last then self:set_search_query(self.search_query:sub(1, last - 1)) end
-	elseif control and input.keyboard:just_pressed("v") then
-		self:set_search_query(self.search_query .. love.system.getClipboardText())
-	elseif input:cursor_just_pressed(1) then
-		local position = self.modal_ui:mouse_pos()
-		if not self.search_button:mouse_over(position) then self:focus_search(false) end
+		local value = field.get()
+		local last = utf8.offset(value, -1)
+		if last then field.set(value:sub(1, last - 1)) end
+	elseif love.keyboard.isDown("lctrl", "rctrl") and input.keyboard:just_pressed("v") then
+		field.set(field.get() .. love.system.getClipboardText())
+	elseif input:cursor_just_pressed(1) and not editing.button:mouse_over(ui:mouse_pos()) then
+		self:focus_text()
 	end
 	return false
+end
+
+function Pool:add_text_field(kernel, x, y, width, height, field)
+	local button = add_button(kernel, x, y, width, height, nil,
+		function(control) self:focus_text(control) end, {
+			content = function(control)
+				local value = field.get()
+				if control.selected then value = value .. "|" end
+				local text = value == "" and field.hint() or value
+				text_at(text, -control.halfsize.x + 10, 0, width - (field.inset or 20), 14,
+					value == "" and tint.muted or tint.ink, nil, field.locale)
+			end,
+		})
+	button.field = field
+	return button
 end
 
 function Pool:page(column, amount)
@@ -948,23 +1058,22 @@ function Pool:build_panel()
 	self.discard_button = add_button(body, x + pw - 291, y + 15, 166, 31,
 		function() return words().discard end, function() self:reset_draft() end)
 	self.close_button.ink = tint.active
-	self.search_button = add_button(body, x + 23, y + 83, pw - 46, 29, nil,
-		function() self:focus_search(true) end, {
-			content = function(button)
-				local query = self.search_query
-				if self.search_input then query = query .. "|" end
-				local text = query == "" and words().search or query
-				text_at(text, -button.halfsize.x + 10, 0, button.halfsize.x * 2 - 57, 14,
-					query == "" and tint.muted or tint.ink)
-			end,
-		})
-	self.search_clear = add_button(body, x + pw - 54, y + 86, 25, 23,
+	local presets_width, presets_gap = 123, 10
+	local search_width = pw - 46 - presets_width - presets_gap
+	self.search_button = self:add_text_field(body, x + 23, y + 83, search_width, 29, {
+		get = function() return self.search_query end,
+		set = function(query) self:set_search_query(query) end,
+		hint = function() return words().search end, inset = 57,
+	})
+	self.search_clear = add_button(body, x + 23 + search_width - 31, y + 86, 25, 23,
 		function() return "X" end,
 		function()
 			self:set_search_query("")
 			self.modal_ui:focus(self.search_button)
 		end)
 	self.search_clear.order = self.search_button.order + 1
+	self.presets_button = add_button(body, x + pw - 23 - presets_width, y + 83, presets_width, 29,
+		function() return words().presets end, function() self:open_presets() end)
 	self.activate_button = add_button(body, x + pw - 183, y + 115, 160, 26,
 		function() return words().activate_all end, function() self:activate_all() end)
 	self.activate_button.ink = tint.active
@@ -1031,6 +1140,227 @@ function Pool:build_panel()
 	end
 end
 
+function Pool:purchased_keys(keys, keep_unavailable)
+	local purchased = set()
+	for _, key in keys:ipairs() do
+		if self:is_purchased_upgrade(key) then purchased:add(key) end
+	end
+	if keep_unavailable then
+		for _, key in keep_unavailable:ipairs() do
+			if not self:is_purchased_upgrade(key) then purchased:add(key) end
+		end
+	end
+	return purchased
+end
+
+function Pool:open_presets()
+	if not self.draft or not self.change_allowed or self.confirmation then return end
+	self:focus_text()
+	self.modal_ui:focus(nil)
+	local purchased = 0
+	for _, cfg in ipairs(self.unlocks) do
+		if self:is_purchased_upgrade(cfg.key) then purchased = purchased + 1 end
+	end
+	self.presets = {entries = read_presets(), name = "", first = 1, purchased = purchased}
+	self:layout_presets()
+	self.presets_ui:focus(self.preset_rows[1].load.visible and self.preset_rows[1].load or self.preset_name)
+end
+
+function Pool:leave_presets()
+	self:focus_text()
+	self.presets = nil
+	self.presets_ui:focus(nil)
+	self.modal_ui:focus(self.presets_button)
+end
+
+function Pool:set_preset_name(name)
+	name = input_line(name, 64)
+	if not name then return end
+	self.presets.name = name
+	self.presets.message = nil
+	self:layout_presets()
+end
+
+function Pool:save_preset(preset)
+	local menu = self.presets
+	if not menu or not SAVE:has_unlock("play_favs") then return end
+	if not preset then
+		local name = menu.name:trim()
+		if name == "" then return end
+		local normalized = search_key(name)
+		for _, entry in ipairs(menu.entries) do
+			if search_key(entry.name) == normalized then
+				menu.message = words().duplicate_preset
+				return
+			end
+		end
+		preset = {name = name}
+		menu.entries[#menu.entries + 1] = preset
+		menu.first = 1 + math.floor((#menu.entries - 1) / presets_per_page) * presets_per_page
+		menu.name = ""
+	end
+	preset.bans = self:purchased_keys(self.draft.bans)
+	preset.favorites = self:purchased_keys(self.draft.favorites)
+	write_presets(menu.entries)
+	menu.message = words().preset_saved:format(preset.name)
+	self:layout_presets()
+	if input.mode == "gamepad" then
+		for _, row in ipairs(self.preset_rows) do
+			if row.load.entry == preset then
+				self.presets_ui:focus(row.load)
+				break
+			end
+		end
+	end
+end
+
+function Pool:load_preset(preset)
+	if not self.presets or not preset or not SAVE:has_unlock("play_favs") then return end
+	local draft = self.draft
+	-- Keep retired keys in the draft so players can still restore them manually.
+	draft.bans = self:purchased_keys(preset.bans, draft.bans)
+	draft.favorites = self:purchased_keys(preset.favorites, draft.favorites)
+	remove_favorite_bans(draft.bans, draft.favorites)
+	self:leave_presets()
+	self.search_query = ""
+	for _, column in ipairs(self.columns) do column.first = 1 end
+	self:refresh()
+	self.loaded_preset = preset.name
+end
+
+function Pool:layout_presets()
+	local menu = self.presets
+	local count = #menu.entries
+	local last = math.min(presets_per_page, count - menu.first + 1)
+	local previous, following = self.preset_previous, self.preset_next
+	previous.visible, following.visible = count > presets_per_page, count > presets_per_page
+	previous.available = menu.first > 1
+	following.available = menu.first + presets_per_page <= count
+	previous.suppress_sound = not previous.available
+	following.suppress_sound = not following.available
+	previous.nav_right = following.available and following or nil
+	following.nav_left = previous.available and previous or nil
+	local page = following.available and following or previous.available and previous or nil
+
+	self.preset_save.available = menu.name:trim() ~= ""
+	self.preset_save.suppress_sound = not self.preset_save.available
+	local save = self.preset_save.available and self.preset_save or nil
+	for index, row in ipairs(self.preset_rows) do
+		local entry = menu.entries[menu.first + index - 1]
+		set_entry(row.load, entry, true)
+		set_entry(row.overwrite, entry, true)
+		if entry then
+			local banned = self:purchased_keys(entry.bans)
+			local favorites = self:purchased_keys(entry.favorites)
+			remove_favorite_bans(banned, favorites)
+			row.banned_count = banned:size()
+			row.favorite_count = favorites:size()
+		end
+		local above, below = self.preset_rows[index - 1], index < last and self.preset_rows[index + 1] or nil
+		row.load.nav_up = above and above.load or self.preset_name
+		row.overwrite.nav_up = above and above.overwrite or save or self.preset_name
+		row.load.nav_down = below and below.load or page
+		row.overwrite.nav_down = below and below.overwrite or page
+	end
+	local first = last > 0 and self.preset_rows[1] or nil
+	local bottom = last > 0 and self.preset_rows[last] or nil
+	previous.nav_up = bottom and bottom.load or nil
+	following.nav_up = bottom and bottom.overwrite or nil
+	self.preset_name.nav_right = save or self.presets_back
+	self.preset_name.nav_down = first and first.load or nil
+	self.presets_back.nav_down = save or self.preset_name
+	self.presets_back.nav_left = self.preset_name
+	self.preset_save.nav_down = first and first.overwrite or nil
+end
+
+function Pool:page_presets(direction)
+	local menu = self.presets
+	local last_page = math.max(0, math.floor((#menu.entries - 1) / presets_per_page))
+	local page = math.floor((menu.first - 1) / presets_per_page)
+	local first = 1 + math.clamp(page + direction, 0, last_page) * presets_per_page
+	if first == menu.first then return end
+	menu.first = first
+	self:layout_presets()
+	if input.mode == "gamepad" then
+		local pager = direction > 0 and self.preset_next or self.preset_previous
+		if not pager.available then
+			self.presets_ui:focus(direction > 0 and self.preset_previous or self.preset_next)
+		end
+	end
+end
+
+function Pool:draw_presets()
+	local L, menu = words(), self.presets
+	local x, y = self.panel_x + 23, self.panel_y
+	local width, height = self.panel_width - 46, self.panel_height
+	self:draw_frame(L.presets)
+	for index, row in ipairs(self.preset_rows) do
+		local entry = row.load.entry
+		if entry then
+			local top = y + 106 + (index - 1) * row_height
+			box("fill", tint.stripe, x, top, width, row_height - 4, 6)
+			text_at(entry.name, x + 12, top + 12, width - 267, 15, tint.ink, nil, "zh")
+			local counts = ("%s %d    %s %d    %s %d"):format(
+				L.favorites, row.favorite_count, L.active, menu.purchased - row.banned_count, L.banned, row.banned_count)
+			text_at(counts, x + 12, top + 32, width - 267, 13, tint.muted)
+		end
+	end
+	local count = #menu.entries
+	if count == 0 then
+		text_at(L.empty_presets, x, y + height / 2, width, 18, tint.muted, "center")
+	elseif count > presets_per_page then
+		local last = math.min(count, menu.first + presets_per_page - 1)
+		text_at(("%d-%d / %d"):format(menu.first, last, count),
+			x, y + height - 80, width - 84, 13, tint.muted, "right")
+	end
+	if menu.message then
+		text_at(menu.message, x, y + height - 54, width, 14, tint.ink, nil, "zh")
+	end
+	text_at(L.preset_hint, x, y + height - 23, width, 13, tint.muted)
+end
+
+function Pool:build_presets()
+	local body = self.presets_menu
+	local x, y = self.panel_x + 23, self.panel_y
+	local width, height = self.panel_width - 46, self.panel_height
+	body:add({draw = function() self:draw_presets() end})
+	self.presets_back = add_button(body, x + width - 123, y + 15, 123, 31,
+		function() return words().back_to_pool end, function() self:leave_presets() end, {key = "escape", gamepad = "b"})
+	self.preset_name = self:add_text_field(body, x, y + 58, width - 175, 33, {
+		get = function() return self.presets.name end,
+		set = function(name) self:set_preset_name(name) end,
+		hint = function() return words().preset_name end, locale = "zh",
+		submit = function() self:save_preset() end,
+	})
+	self.preset_save = add_button(body, x + width - 165, y + 58, 165, 33,
+		function() return words().save_new end, function() self:save_preset() end)
+	self.preset_save.ink = tint.active
+	self.preset_save.nav_left = self.preset_name
+	self.preset_save.nav_up = self.presets_back
+	self.preset_name.nav_up = self.presets_back
+
+	for index = 1, presets_per_page do
+		local top = y + 106 + (index - 1) * row_height
+		local load = add_button(body, x + width - 255, top + 6, 103, 30,
+			function() return words().load_preset end, function(button) self:load_preset(button.entry) end)
+		load.ink = tint.active
+		local overwrite = add_button(body, x + width - 144, top + 6, 138, 30,
+			function() return words().overwrite end, function(button)
+				if not button.entry then return end
+				self.previous_focus = button
+				self:show_confirmation({overwrite = button.entry})
+			end)
+		load.nav_right = overwrite
+		overwrite.nav_left = load
+		self.preset_rows[index] = {load = load, overwrite = overwrite}
+	end
+	local page_y = y + height - 92
+	self.preset_previous = add_button(body, x + width - 66, page_y, 27, 24,
+		function() return "<" end, function() self:page_presets(-1) end)
+	self.preset_next = add_button(body, x + width - 31, page_y, 27, 24,
+		function() return ">" end, function() self:page_presets(1) end)
+end
+
 function Pool:select_inspected_item(item)
 	if not self.inspection or not item then return end
 	self.inspection.item = item
@@ -1066,7 +1396,7 @@ end
 
 function Pool:inspect_upgrade(button, index)
 	if not self.draft or self.confirmation then return end
-	self:focus_search(false)
+	self:focus_text()
 	local entry = button.entry
 	self.inspection = {
 		entry = entry, return_to = button, item = entry.items[index],
@@ -1256,13 +1586,22 @@ function Pool:update(dt)
 		return true
 	end
 	local scroll = input.mouse.scroll.y
+	if self.presets then
+		if self:update_text_input(self.presets_ui) then return true end
+		if scroll ~= 0 and input.mode == "desktop" then self:page_presets(scroll > 0 and -1 or 1) end
+		self.presets_menu:update(dt)
+		return true
+	end
 	if self.inspection then
 		if scroll ~= 0 and input.mode == "desktop" then self:page_details(scroll > 0 and -1 or 1) end
 		self.details:update(dt)
 		return true
 	end
 	if self.open then
-		if self:update_search() then return true end
+		if love.keyboard.isDown("lctrl", "rctrl") and input.keyboard:just_pressed("f") then
+			self:focus_text(self.search_button)
+		end
+		if self:update_text_input(self.modal_ui) then return true end
 		if input.keyboard:just_pressed("escape") or (input.mode == "gamepad" and input.gamepad:just_pressed("b")) then
 			self:request_close()
 			return true
@@ -1329,6 +1668,8 @@ end
 function Pool:draw_overlay()
 	if self.confirmation then
 		self.confirm_menu:draw()
+	elseif self.presets then
+		self.presets_menu:draw()
 	elseif self.inspection then
 		self.details:draw()
 	else
@@ -1356,7 +1697,7 @@ function Pool.new(state, info_box, unlocks)
 		state = state, info_box = info_box, unlocks = unlocks, unlock_by_key = {}, items_by_key = {},
 		width = w, height = h, panel_width = pw, panel_height = ph,
 		panel_x = (w - pw) / 2, panel_y = (h - ph) / 2,
-		columns = {}, detail_tiles = {}, zoom = 1, pivot = vec2(w * 0.33, h * 0.5),
+		columns = {}, detail_tiles = {}, preset_rows = {}, zoom = 1, pivot = vec2(w * 0.33, h * 0.5),
 	}, Pool)
 	for _, cfg in ipairs(unlocks) do self.unlock_by_key[cfg.key] = cfg end
 	self:index_items()
@@ -1369,9 +1710,11 @@ function Pool.new(state, info_box, unlocks)
 
 	self.modal, self.modal_ui = menu_kernel(state.camera)
 	self.details, self.details_ui = menu_kernel(state.camera)
+	self.presets_menu, self.presets_ui = menu_kernel(state.camera)
 	self.confirm_menu, self.confirm_ui = menu_kernel(state.camera)
 	self:build_panel()
 	self:build_details()
+	self:build_presets()
 	self:build_confirmation()
 
 	local top = info_box.pos.y - info_box.halfsize.y - 42
