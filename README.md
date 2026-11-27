@@ -10,3 +10,9 @@ Close the game. Open [unlock.lua](src/states/unlock.lua) and download the raw fi
 - **Steam Deck / Proton** `steamapps/compatdata/4535880/pfx/drive_c/users/steamuser/AppData/Roaming/dice_have_no_eyes/` in your Steam library
 
 Start the game and open **Upgrade pool** in Star Guts. To uninstall, close the game and delete the Lua file you added.
+
+## Screenshots
+
+![Upgrade pool with favorites, banned sets and item previews](screenshots/upgrade-pool.png)
+
+![Ban slot purchase confirmation with the total cost and projected star balance](screenshots/ban-slot-confirmation.png)
