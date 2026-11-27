@@ -3,6 +3,7 @@
 
 local screen_path = "src/states/unlock.lua"
 local supported_build = "2026.11.27-76d72f4"
+local utf8 = require("utf8")
 
 local function little_endian(bytes, position, size)
 	local number = 0
@@ -12,7 +13,7 @@ local function little_endian(bytes, position, size)
 	return number
 end
 
-local function read_screen_from_zip(file)
+local function read_game_file_from_zip(file, path)
 	local size = assert(file:seek("end"))
 	local tail_start = math.max(0, size - 65557)
 	assert(file:seek("set", tail_start))
@@ -40,27 +41,27 @@ local function read_screen_from_zip(file)
 		local extra_length = little_endian(directory, position + 30, 2)
 		local comment_length = little_endian(directory, position + 32, 2)
 		local name_start = position + 46
-		if directory:sub(name_start, name_start + name_length - 1) == screen_path then
+		if directory:sub(name_start, name_start + name_length - 1) == path then
 			local local_offset = little_endian(directory, position + 42, 4)
 			local compressed_size = little_endian(directory, position + 20, 4)
 			local method = little_endian(directory, position + 10, 2)
 			assert(file:seek("set", zip_start + local_offset))
 			local header = assert(file:read(30))
-			assert(header:sub(1, 4) == "PK\3\4", "invalid Star Guts ZIP entry")
+			assert(header:sub(1, 4) == "PK\3\4", "invalid game ZIP entry")
 			assert(file:seek("cur", little_endian(header, 27, 2) + little_endian(header, 29, 2)))
 			local content = assert(file:read(compressed_size))
 			if method == 0 then return content end
-			assert(method == 8, "unsupported compression in Star Guts ZIP entry")
+			assert(method == 8, "unsupported compression in game ZIP entry")
 			return love.data.decompress("string", "deflate", content)
 		end
 		position = name_start + name_length + extra_length + comment_length
 	end
-	error("Star Guts screen is missing from the installed game")
+	error("missing game file: " .. path)
 end
 
-local function original_screen()
+local function original_file(path)
 	local source = love.filesystem.getSource()
-	local file = io.open(source .. "/" .. screen_path, "rb")
+	local file = io.open(source .. "/" .. path, "rb")
 	if file then
 		local content = file:read("*a")
 		file:close()
@@ -68,10 +69,16 @@ local function original_screen()
 	end
 
 	file = assert(io.open(source, "rb"))
-	local ok, result = pcall(read_screen_from_zip, file)
+	local ok, result = pcall(read_game_file_from_zip, file, path)
 	file:close()
 	assert(ok, result)
 	return result
+end
+
+local function patch_once(source, marker, replacement)
+	local first, last = source:find(marker, 1, true)
+	assert(first and not source:find(marker, last + 1, true), "game source structure changed: " .. marker)
+	return source:sub(1, first - 1) .. replacement .. source:sub(last + 1)
 end
 
 local Pool = {}
@@ -80,7 +87,7 @@ Pool.__index = Pool
 local labels = {
 	en = {
 		pool = "Upgrade pool", active = "Active", banned = "Banned", close = "Close", apply = "Apply",
-		ban = "Ban", restore = "Restore", slots = "%d bans · %d slots", next_slot = "Next slot %d ¤",
+		ban = "Ban", restore = "Restore", slots = "%d bans, %d slots", next_slot = "Next slot %d ¤",
 		balance = "Stars %d ¤",
 		locked = "Unlock Bans in the tree to change the pool.",
 		empty_active = "No active upgrades", empty_banned = "No banned upgrades",
@@ -88,16 +95,20 @@ local labels = {
 		mark_favorite = "Add to favorites and keep active", unmark_favorite = "Remove from favorites",
 		open_contents = "View items in this upgrade", back_to_pool = "Back to pool",
 		activate_all = "Activate all", pending_slots = "%d new slots for %d ¤",
-		pending_note = "Confirm the purchase when you leave the pool.",
+		pending_note = "Changes pending",
 		confirm_title = "Confirm slot purchase",
 		purchase = "To apply these changes, buy %d ban %s for %d ¤.",
 		slot_names = {"slot", "slots"},
-		balance_change = "Balance %d ¤ → %d ¤", shortage = "You need %d ¤ more.",
+		balance_now = "Current balance %d ¤", balance_after = "After purchase %d ¤",
+		shortage = "You need %d ¤ more.",
 		revise = "Edit bans", confirm = "Buy and apply",
+		discard = "Discard changes", discard_title = "Discard pending changes?",
+		keep_editing = "Keep editing", discard_close = "Discard and close",
+		search = "Search upgrades or items", no_matches = "No matching upgrades",
 	},
 	ru = {
 		pool = "Пул улучшений", active = "Активные", banned = "В бане", close = "Закрыть", apply = "Применить",
-		ban = "Бан", restore = "Вернуть", slots = "Банов %d · Слотов %d", next_slot = "Следующий слот %d ¤",
+		ban = "Бан", restore = "Вернуть", slots = "Банов %d, слотов %d", next_slot = "Следующий слот %d ¤",
 		balance = "Звёзды %d ¤",
 		locked = "Откройте «Баны» в дереве, чтобы менять пул.",
 		empty_active = "Нет активных улучшений", empty_banned = "Нет забаненных улучшений",
@@ -105,12 +116,16 @@ local labels = {
 		mark_favorite = "В избранное и оставить активным", unmark_favorite = "Убрать из избранного",
 		open_contents = "Посмотреть состав набора", back_to_pool = "К спискам",
 		activate_all = "Активировать всё", pending_slots = "Новых слотов %d за %d ¤",
-		pending_note = "Покупку нужно подтвердить при выходе из списка.",
+		pending_note = "Есть неприменённые изменения",
 		confirm_title = "Подтвердить покупку",
 		purchase = "Для применения настроек нужно купить %d %s бана за %d ¤.",
 		slot_names = {"слот", "слота", "слотов"},
-		balance_change = "Баланс %d ¤ → %d ¤", shortage = "Не хватает %d ¤.",
+		balance_now = "Сейчас %d ¤", balance_after = "После покупки %d ¤",
+		shortage = "Не хватает %d ¤.",
 		revise = "Изменить баны", confirm = "Купить и применить",
+		discard = "Отменить изменения", discard_title = "Отменить неприменённые изменения?",
+		keep_editing = "Продолжить редактирование", discard_close = "Отменить и закрыть",
+		search = "Поиск по улучшениям и предметам", no_matches = "Совпадений нет",
 	},
 }
 
@@ -137,6 +152,22 @@ local favorite_var = "star_guts_pool_favorites"
 
 local function words()
 	return labels[require("locale").get_code()] or labels.en
+end
+
+local function search_key(text)
+	return (UTF8_LOWER(text):gsub("%s+", " ")):trim()
+end
+
+local function matches_query(entry, query, locale)
+	if entry.sort_title:find(query, 1, true) then return true end
+	for _, item in ipairs(entry.items) do
+		if item.search_locale ~= locale then
+			item.search_name = search_key(TS(item.config.name))
+			item.search_locale = locale
+		end
+		if item.search_name:find(query, 1, true) then return true end
+	end
+	return false
 end
 
 local function box(mode, fill, x, y, width, height, radius)
@@ -197,6 +228,14 @@ local function remove_favorite_bans(banned, favorites)
 	return changed
 end
 
+local function same_keys(first, second)
+	if first:size() ~= second:size() then return false end
+	for _, key in first:ipairs() do
+		if not second:has(key) then return false end
+	end
+	return true
+end
+
 local function item_description(config, state)
 	if config.dynamic_description then
 		local ok, description = pcall(config.dynamic_description, table.overlay({state = state}, config))
@@ -205,10 +244,54 @@ local function item_description(config, state)
 	return TS((config.description or ""):dedent())
 end
 
-local function draw_item_tooltip(item, name, description, x, y, width)
+local function draw_cached_description(text, x, y)
+	lg.push("all")
+	lg.setColor(colour.unpack_argb(0xff150830))
+	text:draw(x + 1, y + 4 / display.print_scale)
+	lg.pop()
+	text:draw(x, y)
+end
+
+local function cached_tooltip_drawer()
+	local path = "src/ui/item_hover.lua"
+	local source = (original_file(path):gsub("\r\n", "\n"))
+	source = patch_once(source, "effects, already_translated)", "effects, already_translated, desc_text)")
+	source = patch_once(source, "\tlocal translated_coloured_desc = coloured_text(desc)\n", "")
+	source = patch_once(source,
+		'\tlocal desc_text = display:static_text(translated_coloured_desc, w - padding_x * 2, "center", true)\n', "")
+	source = patch_once(source,
+		'display:print_shadowed(translated_coloured_desc, bx + padding_x, by + padding_y, w - padding_x * 2, "center")',
+		'draw_cached_description(desc_text, bx + padding_x, by + padding_y)')
+	local load_tooltip = assert(loadstring("local draw_cached_description = ...\n" .. source, "@" .. path))
+	return load_tooltip(draw_cached_description).draw
+end
+
+function Pool:prepare_tooltip(item, width)
+	local locale = require("locale").get_code()
+	local font = display:get_font("ui", 11)
+	local cached = self.cached_tooltip
+	if cached and cached.item == item and cached.width == width and cached.locale == locale
+		and cached.font == font and cached.scale == display.print_scale
+	then
+		return cached
+	end
+
 	local config = item.config
-	local tag = config.food and "SNACK" or config.usage == "active" and "SPELL" or nil
-	require("src.ui.item_hover").draw(name, description, tag, x, y, width, config, true)
+	local description = item_description(config, self.state)
+	display:set_font("ui", 11)
+	cached = {
+		item = item, width = width, locale = locale, font = font, scale = display.print_scale,
+		name = TS(config.name), description = description,
+		tag = config.food and "SNACK" or config.usage == "active" and "SPELL" or nil,
+		text = display:static_text(coloured_text(description), width - 10, "center", true),
+	}
+	self.cached_tooltip = cached
+	return cached
+end
+
+function Pool:draw_item_tooltip(tooltip, x, y)
+	self.tooltip_drawer(tooltip.name, tooltip.description, tooltip.tag, x, y, tooltip.width,
+		tooltip.item.config, true, tooltip.text)
 end
 
 local function add_button(kernel, x, y, width, height, label, click, options)
@@ -284,7 +367,6 @@ function Pool:toggle_draft_ban(key)
 	else
 		return false
 	end
-	draft.changed = true
 	self:refresh()
 	return true
 end
@@ -295,7 +377,6 @@ function Pool:activate_all()
 	for _, key in ipairs(banned:values()) do
 		if self:is_purchased_upgrade(key) then
 			banned:remove(key)
-			self.draft.changed = true
 		end
 	end
 	self:refresh()
@@ -309,14 +390,26 @@ function Pool.draw_favorite_label(button)
 end
 
 function Pool:close()
+	self:focus_search(false)
 	self.open = false
 	self.draft = nil
 	self.confirmation = nil
 	self.previous_focus = nil
 	self.inspection = nil
+	self.cached_tooltip = nil
+	if self.background then self.background.source = nil end
 	self.modal_ui:focus(nil)
 	self.details_ui:focus(nil)
 	self.confirm_ui:focus(nil)
+end
+
+function Pool:reset_draft()
+	local draft = self.draft
+	draft.bans = draft.saved_bans:copy()
+	draft.favorites = draft.saved_favorites:copy()
+	remove_favorite_bans(draft.bans, draft.favorites)
+	self:refresh()
+	if input.mode == "gamepad" then self.modal_ui:focus(self.close_button) end
 end
 
 function Pool:apply_draft(quote)
@@ -335,13 +428,25 @@ function Pool:apply_draft(quote)
 end
 
 function Pool:show_confirmation(quote)
+	self:focus_search(false)
 	self.confirmation = quote
-	self.buy_button.available = quote.total <= quote.balance
+	self.buy_button.available = quote.discard or quote.total <= quote.balance
 	self.buy_button.suppress_sound = not self.buy_button.available
+	self.revise_button.nav_right = self.buy_button.available and self.buy_button or nil
 	self.confirm_ui:focus(self.revise_button)
 end
 
 function Pool:request_close()
+	if not self.draft or self.confirmation then return end
+	if self.draft.changed then
+		self.previous_focus = self.modal_ui.gamepad_focus
+		self:show_confirmation({discard = true})
+	else
+		self:close()
+	end
+end
+
+function Pool:request_apply()
 	if not self.draft or self.confirmation then return end
 	local quote = self:quote_purchase()
 	if quote.needed == 0 or not self.draft.changed then
@@ -394,24 +499,37 @@ function Pool:build_confirmation()
 		box("line", tint.edge, x, y, w, h, 10)
 		local sx, sy = lg.transformPoint(x + w / 2, y + h / 2)
 		require("src.shaders.chromab"):add_rect_mask({pos = vec2(sx, sy), size = vec2(w, h) * display.scale})
+		if quote.discard then
+			text_at(L.discard_title, x + 24, y + 88, w - 48, 25, tint.ink, "center")
+			return
+		end
 		text_at(L.confirm_title, x + 24, y + 42, w - 48, 25, tint.ink, "center")
 		local message = L.purchase:format(quote.needed, slot_word(L.slot_names, quote.needed), quote.total)
 		text_at(message, x + 24, y + 90, w - 48, 15, tint.ink, "center")
 		local remaining = quote.balance - quote.total
+		local current = L.balance_now:format(quote.balance)
 		if remaining >= 0 then
-			text_at(L.balance_change:format(quote.balance, remaining), x + 24, y + 132, w - 48, 19, tint.favorite, "center")
+			text_at(current, x + 24, y + 132, w / 2 - 28, 17, tint.ink, "center")
+			text_at(L.balance_after:format(remaining), x + w / 2 + 4, y + 132, w / 2 - 28, 17, tint.favorite, "center")
 		else
-			local note = L.balance:format(quote.balance) .. "   ·   " .. L.shortage:format(-remaining)
+			local note = current .. "    " .. L.shortage:format(-remaining)
 			text_at(note, x + 24, y + 132, w - 48, 16, tint.banned, "center")
 		end
 	end})
 	local width = (w - 72) / 2
 	self.buy_button = add_button(kernel, x + w - width - 26, y + h - 66, width, 38,
-		function() return words().confirm end, function() self:confirm_purchase() end)
+		function() return self.confirmation.discard and words().discard_close or words().confirm end,
+		function()
+			if self.confirmation.discard then
+				self:close()
+			else
+				self:confirm_purchase()
+			end
+		end)
 	self.buy_button.ink = tint.favorite
 	self.revise_button = add_button(kernel, x + 26, y + h - 66, width, 38,
-		function() return words().revise end, function() self:revise_bans() end, {key = "escape", gamepad = "b"})
-	self.revise_button.nav_right = self.buy_button
+		function() return self.confirmation.discard and words().keep_editing or words().revise end,
+		function() self:revise_bans() end, {key = "escape", gamepad = "b"})
 	self.buy_button.nav_left = self.revise_button
 end
 
@@ -482,23 +600,25 @@ function Pool:draw_panel()
 	self.hovered_item = nil
 	self.hover_help = nil
 
-	local summary = L.slots:format(self.used_slots, self.slot_count)
+	local summary = L.balance:format(SAVE.stars) .. "     " .. L.slots:format(self.used_slots, self.slot_count)
+	text_at(summary, x + 24, y + 64, pw - 312, 14, tint.muted)
 	if self.pending_slots > 0 then
-		summary = summary .. "   ·   " .. L.pending_slots:format(self.pending_slots, self.pending_total)
+		text_at(L.pending_slots:format(self.pending_slots, self.pending_total), x + pw - 283, y + 64,
+			260, 15, tint.favorite, "right")
 	elseif self.change_allowed and self.next_cost > 0 then
-		summary = summary .. "   ·   " .. L.next_slot:format(self.next_cost)
+		text_at(L.next_slot:format(self.next_cost), x + pw - 283, y + 64, 260, 14, tint.muted, "right")
 	end
-	text_at(summary, x + 24, y + 64, pw - 218, 14, tint.muted)
-	text_at(L.balance:format(SAVE.stars), x + pw - 186, y + 64, 163, 14, tint.ink, "right")
 
 	for index, column in ipairs(self.columns) do
 		local ink = index == 1 and tint.active or tint.banned
 		local heading = index == 1 and L.active or L.banned
 		local heading_width = index == 1 and column.width / 2 or column.width - 181
-		text_at(heading .. " · " .. #column.entries, column.x + 8, y + 94, heading_width, 17, ink)
+		local count = tostring(#column.entries)
+		if #column.entries ~= #column.all_entries then count = count .. "/" .. #column.all_entries end
+		text_at(heading .. " " .. count, column.x + 8, column.y - 16, heading_width, 17, ink)
 		if index == 1 then
-			draw_star(column.x + heading_width + 2, y + 94, self.favorite_count > 0, true)
-			text_at(L.favorites .. " " .. self.favorite_count, column.x + heading_width + 15, y + 94,
+			draw_star(column.x + heading_width + 2, column.y - 16, self.favorite_count > 0, true)
+			text_at(L.favorites .. " " .. self.favorite_count, column.x + heading_width + 15, column.y - 16,
 				column.width - heading_width - 23, 14, tint.favorite)
 		end
 		for row_number, row in ipairs(column.rows) do
@@ -507,7 +627,8 @@ function Pool:draw_panel()
 			end
 		end
 		if #column.entries == 0 then
-			local message = index == 1 and L.empty_active or L.empty_banned
+			local message = #column.all_entries > 0 and L.no_matches
+				or index == 1 and L.empty_active or L.empty_banned
 			text_at(message, column.x + 8, column.y + 31, column.width - 16, 14, tint.muted)
 		elseif #column.entries > rows_per_column then
 			local last = math.min(#column.entries, column.first + rows_per_column - 1)
@@ -519,11 +640,11 @@ function Pool:draw_panel()
 
 	if not self.change_allowed then
 		text_at(L.locked, x + 24, y + ph - 23, pw - 48, 13, tint.muted)
-	elseif self.hover_help then
-		text_at(self.hover_help, x + 24, y + ph - 23, pw - 48, 13, tint.muted)
 	elseif self.pending_total > SAVE.stars then
 		text_at(L.shortage:format(self.pending_total - SAVE.stars), x + 24, y + ph - 23, pw - 48, 13, tint.banned)
-	elseif self.pending_slots > 0 then
+	elseif self.hover_help then
+		text_at(self.hover_help, x + 24, y + ph - 23, pw - 48, 13, tint.muted)
+	elseif self.draft.changed then
 		text_at(L.pending_note, x + 24, y + ph - 23, pw - 48, 13, tint.muted)
 	end
 end
@@ -531,17 +652,14 @@ end
 function Pool:draw_icon_hover()
 	local hover = self.hovered_item
 	if not hover then return end
-	local name = TS(hover.item.config.name)
-	local description = item_description(hover.item.config, self.state)
 	local width = 224
-	display:set_font("ui", 11)
-	local measured = display:static_text(coloured_text(description), width - 10, "center", true)
-	local half = (measured.size.y + 16) / 2
+	local tooltip = self:prepare_tooltip(hover.item, width)
+	local half = math.max(20, tooltip.text.size.y + 16) / 2
 	local x = math.clamp(hover.x, 154, self.width - 154)
 	local y = hover.y - half - 20
 	if y - half < 38 then y = hover.y + half + 38 end
 	box("fill", tint.box, x - width / 2 - 7, y - half - 25, width + 14, half * 2 + 37, 6)
-	draw_item_tooltip(hover.item, name, description, x, y, width)
+	self:draw_item_tooltip(tooltip, x, y)
 end
 
 local function set_entry(control, entry, available)
@@ -557,10 +675,12 @@ local function row_focus(row, lane)
 	if lane and row[lane] and row[lane].available then return row[lane] end
 	if row.available then return row end
 	if row.star.available then return row.star end
-	return row.preview.available and row.preview or row
+	if row.preview.available then return row.preview end
 end
 
 function Pool:layout_rows()
+	self.discard_button.visible = self.draft.changed
+	self.search_clear.visible = self.search_query ~= ""
 	for index, column in ipairs(self.columns) do
 		local last_first = math.max(1, #column.entries - rows_per_column + 1)
 		column.first = math.clamp(column.first, 1, last_first)
@@ -584,13 +704,13 @@ function Pool:layout_rows()
 		local other = self.columns[3 - index]
 		local last = math.min(rows_per_column, #column.entries)
 		local other_last = math.min(rows_per_column, #other.entries)
-		local header = index == 2 and self.activate_button.available and self.activate_button or self.close_button
+		local header = index == 2 and self.activate_button.available and self.activate_button or self.search_button
 		for row_number = 1, last do
 			local row = column.rows[row_number]
-			local opposite = row_focus(other.rows[math.min(row_number, other_last)]) or self.close_button
+			local opposite = row_focus(other.rows[math.min(row_number, other_last)]) or self.search_button
 			local previous = column.rows[row_number - 1]
 			local following = row_number < last and column.rows[row_number + 1] or nil
-			local page = column.following.visible and column.following or nil
+			local page = column.following.available and column.following or column.previous.available and column.previous or nil
 			row.nav_up = row_focus(previous) or header
 			row.nav_down = row_focus(following) or page
 			row.nav_left = row.star.available and row.star or row.preview.available and row.preview
@@ -599,24 +719,33 @@ function Pool:layout_rows()
 			row.star.nav_up = row_focus(previous, "star") or header
 			row.star.nav_down = row_focus(following, "star") or page
 			row.star.nav_left = row.preview.available and row.preview or index == 2 and opposite or nil
-			row.star.nav_right = row
+			row.star.nav_right = row.available and row or index == 1 and opposite or nil
 			row.preview.nav_up = row_focus(previous, "preview") or header
 			row.preview.nav_down = row_focus(following, "preview") or page
 			row.preview.nav_left = index == 2 and opposite or nil
-			row.preview.nav_right = row.star.available and row.star or row
+			row.preview.nav_right = row.star.available and row.star or row.available and row or index == 1 and opposite or nil
 		end
-		column.previous.nav_up = row_focus(column.rows[last]) or self.close_button
+		column.previous.nav_up = row_focus(column.rows[last]) or self.search_button
 		column.following.nav_up = column.previous.nav_up
-		column.previous.nav_right = column.following
-		column.following.nav_left = column.previous
+		column.previous.nav_right = column.following.available and column.following or nil
+		column.following.nav_left = column.previous.available and column.previous or nil
 	end
-	local left_first = self.columns[1].rows[1]
-	local right_first = self.columns[2].rows[1]
-	self.activate_button.nav_up = self.close_button
-	self.activate_button.nav_down = row_focus(right_first.visible and right_first or left_first)
-	self.activate_button.nav_left = left_first.visible and row_focus(left_first) or nil
-	self.close_button.nav_down = self.activate_button.available and self.activate_button or self.activate_button.nav_down
-	self.close_button.nav_left = row_focus(left_first.visible and left_first or right_first)
+	local first_active = row_focus(self.columns[1].rows[1])
+	local first_banned = row_focus(self.columns[2].rows[1])
+	local edit_bans = self.activate_button.available and self.activate_button or first_banned
+	self.activate_button.nav_up = self.search_button
+	self.activate_button.nav_down = first_banned or first_active
+	self.activate_button.nav_left = first_active or self.search_button
+	self.close_button.nav_down = self.search_clear.visible and self.search_clear or self.search_button
+	self.close_button.nav_left = self.discard_button.visible and self.discard_button or self.search_button
+	self.discard_button.nav_right = self.close_button
+	self.discard_button.nav_down = self.search_button
+	self.search_button.nav_up = self.discard_button.visible and self.discard_button or self.close_button
+	self.search_button.nav_down = first_active or edit_bans
+	self.search_button.nav_right = self.search_clear.visible and self.search_clear or edit_bans
+	self.search_clear.nav_up = self.close_button
+	self.search_clear.nav_left = self.search_button
+	self.search_clear.nav_down = edit_bans or first_active
 end
 
 function Pool:is_purchased_upgrade(key)
@@ -635,14 +764,15 @@ function Pool:toggle_favorite(key)
 		self.draft.bans:remove(key)
 		self.columns[1].first = 1
 	end
-	self.draft.changed = true
 	self:refresh()
 	return true
 end
 
 function Pool:refresh()
 	local bans = require("src.bans")
-	local banned, favorites = self.draft.bans, self.draft.favorites
+	local draft = self.draft
+	local banned, favorites = draft.bans, draft.favorites
+	draft.changed = not (same_keys(banned, draft.saved_bans) and same_keys(favorites, draft.saved_favorites))
 	local quote = self:quote_purchase()
 	self.used_slots, self.slot_count = quote.used, quote.owned
 	self.pending_slots, self.pending_total = quote.needed, quote.total
@@ -671,24 +801,123 @@ function Pool:refresh()
 	end
 	self.activate_button.available = self.change_allowed and can_activate_all
 	self.activate_button.suppress_sound = not self.activate_button.available
-	self.columns[1].entries = active_entries
-	self.columns[2].entries = banned_entries
+	self.columns[1].all_entries = active_entries
+	self.columns[2].all_entries = banned_entries
 	for _, column in ipairs(self.columns) do
-		for _, entry in ipairs(column.entries) do
-			entry.sort_title = UTF8_LOWER(entry.title)
+		for _, entry in ipairs(column.all_entries) do
+			entry.sort_title = search_key(entry.title)
 		end
-		table.sort(column.entries, function(a, b)
+		table.sort(column.all_entries, function(a, b)
 			if a.favorite ~= b.favorite then return a.favorite end
 			if a.sort_title == b.sort_title then return a.key < b.key end
 			return a.sort_title < b.sort_title
 		end)
 	end
+	self.cached_tooltip = nil
+	self:filter_entries()
+end
+
+function Pool:filter_entries(reset_page)
+	local query = search_key(self.search_query)
+	local locale = require("locale").get_code()
+	for _, column in ipairs(self.columns) do
+		if query == "" then
+			column.entries = column.all_entries
+		else
+			local filtered = {}
+			for _, entry in ipairs(column.all_entries) do
+				if matches_query(entry, query, locale) then filtered[#filtered + 1] = entry end
+			end
+			column.entries = filtered
+		end
+		if reset_page then column.first = 1 end
+	end
 	self:layout_rows()
+end
+
+function Pool:set_search_query(query)
+	query = query:gsub("%c", " ")
+	if not utf8.len(query) then return end
+	local limit = utf8.offset(query, 81)
+	if limit then query = query:sub(1, limit - 1) end
+	if self.search_query == query then return end
+	self.search_query = query
+	self:filter_entries(true)
+end
+
+function Pool:focus_search(focused)
+	local current = self.search_input
+	if focused and not current then
+		current = {
+			previous = love.textinput,
+			text_enabled = love.keyboard.hasTextInput(),
+			key_repeat = love.keyboard.hasKeyRepeat(),
+		}
+		current.callback = function(text) self:set_search_query(self.search_query .. text) end
+		self.search_input = current
+		self.search_button.selected = true
+		love.textinput = current.callback
+		love.keyboard.setTextInput(true)
+		love.keyboard.setKeyRepeat(true)
+	elseif not focused and current then
+		if love.textinput == current.callback then love.textinput = current.previous end
+		love.keyboard.setTextInput(current.text_enabled)
+		love.keyboard.setKeyRepeat(current.key_repeat)
+		self.search_input = nil
+		self.search_button.selected = false
+	end
+end
+
+function Pool:update_search()
+	local control = love.keyboard.isDown("lctrl", "rctrl")
+	if control and input.keyboard:just_pressed("f") then self:focus_search(true) end
+	if not self.search_input then return false end
+	if input.keyboard:just_pressed("escape") or (input.mode == "gamepad" and input.gamepad:just_pressed("b")) then
+		self:focus_search(false)
+		return true
+	end
+	if input.keyboard:just_pressed("return") or input.keyboard:just_pressed("kpenter") then
+		self:focus_search(false)
+	elseif input.keyboard:just_pressed("backspace") then
+		local last = utf8.offset(self.search_query, -1)
+		if last then self:set_search_query(self.search_query:sub(1, last - 1)) end
+	elseif control and input.keyboard:just_pressed("v") then
+		self:set_search_query(self.search_query .. love.system.getClipboardText())
+	elseif input:cursor_just_pressed(1) then
+		local position = self.modal_ui:mouse_pos()
+		if not self.search_button:mouse_over(position) then self:focus_search(false) end
+	end
+	return false
 end
 
 function Pool:page(column, amount)
 	column.first = column.first + amount
 	self:layout_rows()
+end
+
+local row_lanes = {"action", "star", "preview"}
+
+function Pool:scroll_focused_row()
+	if input.mode ~= "gamepad" then return false end
+	local down = input.gamepad:just_pressed("dpdown")
+	local up = input.gamepad:just_pressed("dpup")
+	if not (down or up) then return false end
+	local position = self.modal_ui:mouse_pos()
+	for _, column in ipairs(self.columns) do
+		local pager = down and column.following or column.previous
+		if pager.available then
+			local row = column.rows[down and rows_per_column or 1]
+			for _, lane in ipairs(row_lanes) do
+				local control = row[lane] or row
+				if control.available and control:mouse_over(position) then
+					self:page(column, down and 1 or -1)
+					self.modal_ui:focus(row_focus(row, lane) or self.search_button)
+					return true
+				end
+			end
+		end
+	end
+	return false
 end
 
 function Pool:open_panel()
@@ -699,12 +928,12 @@ function Pool:open_panel()
 		scroll.drag:sset(0, 0)
 	end
 	self.open = true
+	self.search_query = ""
 	local bans = require("src.bans")
-	self.draft = {bans = bans:get(), favorites = favorite_keys()}
-	self.draft.changed = remove_favorite_bans(self.draft.bans, self.draft.favorites)
-	self:refresh()
+	self.draft = {saved_bans = bans:get(), saved_favorites = favorite_keys()}
+	self:reset_draft()
 	local first = self.columns[1].rows[1]
-	self.modal_ui:focus(first.visible and row_focus(first) or self.close_button)
+	self.modal_ui:focus(row_focus(first) or self.search_button)
 	return true
 end
 
@@ -715,8 +944,28 @@ function Pool:build_panel()
 	body:add({draw = function() self:draw_panel() end})
 	self.close_button = add_button(body, x + pw - 115, y + 15, 92, 31,
 		function() return self.draft.changed and words().apply or words().close end,
-		function() self:request_close() end, {key = "escape", gamepad = "b"})
-	self.activate_button = add_button(body, x + pw - 183, y + 81, 160, 26,
+		function() self:request_apply() end)
+	self.discard_button = add_button(body, x + pw - 291, y + 15, 166, 31,
+		function() return words().discard end, function() self:reset_draft() end)
+	self.close_button.ink = tint.active
+	self.search_button = add_button(body, x + 23, y + 83, pw - 46, 29, nil,
+		function() self:focus_search(true) end, {
+			content = function(button)
+				local query = self.search_query
+				if self.search_input then query = query .. "|" end
+				local text = query == "" and words().search or query
+				text_at(text, -button.halfsize.x + 10, 0, button.halfsize.x * 2 - 57, 14,
+					query == "" and tint.muted or tint.ink)
+			end,
+		})
+	self.search_clear = add_button(body, x + pw - 54, y + 86, 25, 23,
+		function() return "X" end,
+		function()
+			self:set_search_query("")
+			self.modal_ui:focus(self.search_button)
+		end)
+	self.search_clear.order = self.search_button.order + 1
+	self.activate_button = add_button(body, x + pw - 183, y + 115, 160, 26,
 		function() return words().activate_all end, function() self:activate_all() end)
 	self.activate_button.ink = tint.active
 
@@ -724,8 +973,8 @@ function Pool:build_panel()
 	local width = (pw - gap - 46) / 2
 	for index = 1, 2 do
 		local cx = x + 23 + (index - 1) * (width + gap)
-		local cy = y + 110
-		local column = {x = cx, y = cy, width = width, first = 1, rows = {}, entries = {}}
+		local cy = y + 144
+		local column = {x = cx, y = cy, width = width, first = 1, rows = {}, entries = {}, all_entries = {}}
 		self.columns[index] = column
 		for row_number = 1, rows_per_column do
 			local row_top = cy + (row_number - 1) * row_height
@@ -733,9 +982,6 @@ function Pool:build_panel()
 				function(button)
 					if button.entry.favorite then return words().protected end
 					if index == 2 then return words().restore end
-					if self.change_allowed and self.next_cost > 0 then
-						return ("%s · %d ¤"):format(words().ban, self.next_cost)
-					end
 					return words().ban
 				end,
 				function(button)
@@ -820,6 +1066,7 @@ end
 
 function Pool:inspect_upgrade(button, index)
 	if not self.draft or self.confirmation then return end
+	self:focus_search(false)
 	local entry = button.entry
 	self.inspection = {
 		entry = entry, return_to = button, item = entry.items[index],
@@ -863,7 +1110,7 @@ function Pool:draw_details()
 	local cx = x + pw - 23 - 158
 	box("fill", tint.stripe, cx - 158, y + 98, 316, ph - 121, 8)
 	self:draw_item_icon(item, cx, y + 162, 78)
-	draw_item_tooltip(item, TS(item.config.name), item_description(item.config, self.state), cx, y + 285, 275)
+	self:draw_item_tooltip(self:prepare_tooltip(item, 275), cx, y + 285)
 
 	local count = #inspection.entry.items
 	if count > items_per_page then
@@ -1014,6 +1261,14 @@ function Pool:update(dt)
 		self.details:update(dt)
 		return true
 	end
+	if self.open then
+		if self:update_search() then return true end
+		if input.keyboard:just_pressed("escape") or (input.mode == "gamepad" and input.gamepad:just_pressed("b")) then
+			self:request_close()
+			return true
+		end
+		if self:scroll_focused_row() then return true end
+	end
 	if scroll ~= 0 and input.mode == "desktop" then
 		self.state.camera:check_display()
 		local pos = self.state.camera:screen_to_ui(input:cursor())
@@ -1047,9 +1302,56 @@ local function menu_kernel(camera)
 	return kernel, ui
 end
 
+local function copy_canvas(source, target)
+	lg.push("all")
+	lg.origin()
+	lg.setCanvas(target)
+	lg.setScissor()
+	lg.setShader()
+	lg.setColor(1, 1, 1, 1)
+	lg.setBlendMode("replace", "premultiplied")
+	lg.draw(source)
+	lg.pop()
+end
+
+function Pool:capture_background()
+	local w, h = display:dimensions()
+	local background = self.background
+	if not background or background.width ~= w or background.height ~= h then
+		background = {width = w, height = h, world = lg.newCanvas(w, h), ui = lg.newCanvas(w, h)}
+		self.background = background
+	end
+	copy_canvas(display.current_frame, background.world)
+	copy_canvas(display.ui_frame, background.ui)
+	background.source = display.ui_frame
+end
+
+function Pool:draw_overlay()
+	if self.confirmation then
+		self.confirm_menu:draw()
+	elseif self.inspection then
+		self.details:draw()
+	else
+		self.modal:draw()
+		self:draw_icon_hover()
+	end
+end
+
+function Pool:draw_cached_background()
+	local background = self.background
+	if not self.open or not background or background.source ~= display.ui_frame then return false end
+	self.state.camera:check_display()
+	copy_canvas(background.world, display.current_frame)
+	display:start_ui()
+	copy_canvas(background.ui, display.ui_frame)
+	lg.scale(display.scale)
+	self:draw_overlay()
+	return true
+end
+
 function Pool.new(state, info_box, unlocks)
 	local w, h = display:dimensions_scaled()
-	local pw, ph = math.min(w - 44, 864), math.min(h - 36, 460)
+	local pw, ph = math.min(w - 44, 864), math.min(h - 36, 486)
 	local self = setmetatable({
 		state = state, info_box = info_box, unlocks = unlocks, unlock_by_key = {}, items_by_key = {},
 		width = w, height = h, panel_width = pw, panel_height = ph,
@@ -1058,6 +1360,12 @@ function Pool.new(state, info_box, unlocks)
 	}, Pool)
 	for _, cfg in ipairs(unlocks) do self.unlock_by_key[cfg.key] = cfg end
 	self:index_items()
+	local ok, tooltip_drawer = pcall(cached_tooltip_drawer)
+	if not ok then
+		print("Star Guts Pool tooltip cache skipped: " .. tostring(tooltip_drawer))
+		tooltip_drawer = require("src.ui.item_hover").draw
+	end
+	self.tooltip_drawer = tooltip_drawer
 
 	self.modal, self.modal_ui = menu_kernel(state.camera)
 	self.details, self.details_ui = menu_kernel(state.camera)
@@ -1079,13 +1387,9 @@ function Pool.new(state, info_box, unlocks)
 	state.k:add_from_system("ui", {
 		order = 350,
 		draw = function()
-			if self.confirmation then
-				self.confirm_menu:draw()
-			elseif self.inspection then
-				self.details:draw()
-			elseif self.open then
-				self.modal:draw()
-				self:draw_icon_hover()
+			if self.open then
+				self:capture_background()
+				self:draw_overlay()
 			end
 		end,
 	})
@@ -1094,9 +1398,7 @@ end
 
 local function attach_to_screen(source)
 	local function patch(marker, replacement)
-		local first, last = source:find(marker, 1, true)
-		assert(first and not source:find(marker, last + 1, true), "Star Guts screen structure changed")
-		source = source:sub(1, first - 1) .. replacement .. source:sub(last + 1)
+		source = patch_once(source, marker, replacement)
 	end
 	local unlocks = '\tlocal item_unlocks = require("src.item_unlocks")'
 	patch(unlocks, unlocks .. '\n\tself.star_guts_pool = star_guts_pool.new(self, info_box, item_unlocks)')
@@ -1131,16 +1433,23 @@ local function attach_to_screen(source)
 end
 
 function state:exit()
-	if self.star_guts_pool then self.star_guts_pool:close() end
+	if self.star_guts_pool then
+		self.star_guts_pool:close()
+		self.star_guts_pool.background = nil
+	end
 end
 
 function state:update(dt)
 	if not self.transition and self.star_guts_pool and self.star_guts_pool:update(dt) then return end
 	self.k:update(dt)]])
+	patch("function state:draw()\n\tself.camera:push()", [[
+function state:draw()
+	if self.star_guts_pool and self.star_guts_pool:draw_cached_background() then return end
+	self.camera:push()]])
 	return assert(loadstring("local star_guts_pool = ...\n" .. source, "@" .. screen_path))
 end
 
-local source = original_screen()
+local source = original_file(screen_path)
 if BUILD_ID == supported_build then
 	local ok, patched = pcall(attach_to_screen, (source:gsub("\r\n", "\n")))
 	if ok then
