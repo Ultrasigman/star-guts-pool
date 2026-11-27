@@ -1378,7 +1378,7 @@ function Pool.new(state, info_box, unlocks)
 	add_button(state.k, info_box.pos.x - 92, top, 184, 30,
 		function() return words().pool end, function() self:open_panel() end, {gamepad = "x", font = 16})
 	local zx, zy = w * 0.33 - 59, h * 0.90 - 14
-	add_button(state.k, zx, zy, 29, 28, function() return "−" end,
+	add_button(state.k, zx, zy, 29, 28, function() return "-" end,
 		function() self:set_zoom(self.zoom / 1.16, self.pivot) end, {font = 18})
 	add_button(state.k, zx + 33, zy, 52, 28, function() return ("%d%%"):format(math.floor(self.zoom * 100 + 0.5)) end,
 		function() self:reset_zoom() end)
