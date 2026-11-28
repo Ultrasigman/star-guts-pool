@@ -4,7 +4,7 @@ Manage your upgrade pool from the Star Guts menu in Dice Have No Eyes. Compatibl
 
 ## Install
 
-Close the game. Open [unlock.lua](src/states/unlock.lua) and download the raw file. Place it at `src/states/unlock.lua` inside your save folder, creating the folders if needed.
+Close the game. Download `Star-Guts-Pool-v*.zip` from **Releases** and extract it into your game save folder. You can also download [unlock.lua](src/states/unlock.lua) and place it at `src/states/unlock.lua` inside that folder.
 
 - **Windows** `%APPDATA%\dice_have_no_eyes\`
 - **Steam Deck / Proton** `steamapps/compatdata/4535880/pfx/drive_c/users/steamuser/AppData/Roaming/dice_have_no_eyes/` in your Steam library

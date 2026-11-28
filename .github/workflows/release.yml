@@ -1,0 +1,70 @@
+name: Release Star Guts Pool
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: star-guts-pool-release
+  queue: max
+
+jobs:
+  release:
+    if: ${{ !github.event.deleted }}
+    runs-on: ubuntu-latest
+    env:
+      VERSION: v0.1.${{ github.run_number }}
+    steps:
+      - name: Check out the pushed commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Build the install ZIP
+        shell: bash
+        run: |
+          git cat-file -e "$GITHUB_SHA:src/states/unlock.lua"
+          git archive --format=zip --output="$RUNNER_TEMP/Star-Guts-Pool-$VERSION.zip" "$GITHUB_SHA" src/
+
+      - name: Publish the GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          archive="$RUNNER_TEMP/Star-Guts-Pool-$VERSION.zip"
+          notes="$RUNNER_TEMP/star-guts-pool-release.md"
+
+          tagged_commit=$(git rev-parse --quiet --verify "refs/tags/$VERSION^{commit}" || true)
+          if [[ -n "$tagged_commit" && "$tagged_commit" != "$GITHUB_SHA" ]]; then
+            echo "Tag $VERSION already points to a different commit." >&2
+            exit 1
+          fi
+
+          if draft=$(gh release view "$VERSION" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [[ "$draft" == true ]]; then
+              gh release upload "$VERSION" "$archive" --clobber
+              gh release edit "$VERSION" --draft=false
+            fi
+            exit 0
+          fi
+
+          previous=$(git describe --tags --abbrev=0 --match 'v0.1.[0-9]*' --exclude "$VERSION" "$GITHUB_SHA" 2>/dev/null || true)
+          {
+            printf 'Close the game and extract `%s` into your save folder.\n\n' "${archive##*/}"
+            printf '## Changes\n\n'
+            if [[ -n "$previous" ]]; then
+              git log --no-merges --format='- %s' "$previous..$GITHUB_SHA"
+              printf '\n[Compare %s and %s](%s/%s/compare/%s...%s)\n' \
+                "$previous" "$VERSION" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$previous" "$VERSION"
+            else
+              git log --no-merges --format='- %s' "$GITHUB_SHA"
+            fi
+          } > "$notes"
+
+          gh release create "$VERSION" "$archive" --target "$GITHUB_SHA" \
+            --title "Star Guts Pool $VERSION" --notes-file "$notes"
